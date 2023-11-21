@@ -349,6 +349,7 @@ name = "aleph-node"
 version = "0.13.0+dev"
 dependencies = [
  "aleph-runtime",
+ "async-trait",
  "finality-aleph",
  "frame-benchmarking",
  "frame-benchmarking-cli",

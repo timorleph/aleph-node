@@ -15,23 +15,25 @@ use finality_aleph::{
 use futures::channel::mpsc;
 use log::warn;
 use sc_client_api::{BlockBackend, HeaderBackend};
-use sc_consensus::ImportQueue;
+use sc_consensus::{IncomingBlock, ImportQueue, Link, import_queue::{ImportQueueService, RuntimeOrigin}};
 use sc_consensus_aura::{ImportQueueParams, SlotProportion, StartAuraParams};
 use sc_consensus_slots::BackoffAuthoringBlocksStrategy;
 use sc_network::NetworkService;
 use sc_network_sync::SyncingService;
 use sc_service::{
     error::Error as ServiceError, Configuration, KeystoreContainer, NetworkStarter, RpcHandlers,
-    TFullClient, TaskManager,
+    TFullClient, TaskManager, ImportQueue as ImportQueueT,
 };
 use sc_telemetry::{Telemetry, TelemetryWorker};
 use sp_api::ProvideRuntimeApi;
 use sp_arithmetic::traits::BaseArithmetic;
+use sp_consensus::BlockOrigin;
 use sp_consensus_aura::{sr25519::AuthorityPair as AuraPair, Slot};
+use sp_runtime::Justifications;
 
 use crate::{
     aleph_cli::AlephCli,
-    aleph_primitives::{AlephSessionApi, BlockHash, MAX_BLOCK_SIZE},
+    aleph_primitives::{AlephSessionApi, BlockHash, BlockNumber, MAX_BLOCK_SIZE},
     chain_spec::DEFAULT_BACKUP_FOLDER,
     executor::AlephExecutor,
     rpc::{create_full as create_full_rpc, FullDeps as RpcFullDeps},
@@ -40,6 +42,45 @@ use crate::{
 type FullClient = sc_service::TFullClient<Block, RuntimeApi, AlephExecutor>;
 type FullBackend = sc_service::TFullBackend<Block>;
 type FullSelectChain = sc_consensus::LongestChain<FullBackend, Block>;
+
+#[derive(Clone)]
+struct NoImportQueueService;
+
+impl ImportQueueService<Block> for NoImportQueueService {
+    fn import_blocks(
+        &mut self,
+        _origin: BlockOrigin,
+        _blocks: Vec<IncomingBlock<Block>>
+    ) {}
+    fn import_justifications(
+        &mut self,
+        _who: RuntimeOrigin,
+        _hash: BlockHash,
+        _number: BlockNumber,
+        _justifications: Justifications
+    ) {}
+}
+
+struct NoImportQueue(sc_consensus::DefaultImportQueue<Block>, NoImportQueueService);
+
+#[async_trait::async_trait]
+impl ImportQueueT<Block> for NoImportQueue {
+	fn service(&self) -> Box<dyn ImportQueueService<Block>> {
+      Box::new(self.1.clone())
+  }
+
+	fn service_ref(&mut self) -> &mut dyn ImportQueueService<Block> {
+      &mut self.1
+  }
+
+	fn poll_actions(&mut self, cx: &mut futures::task::Context, link: &mut dyn Link<Block>) {
+      self.0.poll_actions(cx, link);
+  }
+
+	async fn run(self, link: Box<dyn Link<Block>>) {
+      self.0.run(link).await;
+  }
+}
 
 struct LimitNonfinalized(u32);
 
@@ -250,7 +291,7 @@ fn setup(
             client: client.clone(),
             transaction_pool: transaction_pool.clone(),
             spawn_handle: task_manager.spawn_handle(),
-            import_queue,
+            import_queue: NoImportQueue(import_queue, NoImportQueueService),
             block_announce_validator_builder: None,
             warp_sync_params: None,
             block_relay: None,
