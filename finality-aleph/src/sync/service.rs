@@ -1,4 +1,8 @@
-use std::{collections::HashSet, fmt::Display, time::Duration};
+use std::{
+    collections::HashSet,
+    fmt::Display,
+    time::{Duration, Instant},
+};
 
 use futures::{
     channel::{mpsc, oneshot},
@@ -38,6 +42,7 @@ use crate::{
 const BROADCAST_COOLDOWN: Duration = Duration::from_millis(600);
 const CHAIN_EXTENSION_COOLDOWN: Duration = Duration::from_millis(300);
 const TICK_PERIOD: Duration = Duration::from_secs(5);
+const MAJOR_SYNC_REQUEST_COOLDOWN: Duration = Duration::from_secs(2);
 
 pub struct IO<B, J, N, CE, CS, F, BI>
 where
@@ -143,6 +148,7 @@ where
     block_requests_from_user: mpsc::UnboundedReceiver<B::UnverifiedHeader>,
     blocks_from_creator: mpsc::UnboundedReceiver<B>,
     major_sync_last_status: bool,
+    last_major_sync_request: Instant,
     metrics: Metrics,
     slo_metrics: SloMetrics,
     favourite_block_request: mpsc::UnboundedReceiver<oneshot::Sender<J::Header>>,
@@ -217,6 +223,9 @@ where
                 blocks_from_creator,
                 block_requests_from_user,
                 major_sync_last_status: false,
+                last_major_sync_request: Instant::now()
+                    .checked_sub(MAJOR_SYNC_REQUEST_COOLDOWN)
+                    .expect("two seconds ago should be fine"),
                 metrics,
                 slo_metrics,
                 favourite_block_request,
@@ -312,7 +321,23 @@ where
         }
     }
 
+    fn major_sync_cooldown(&mut self) -> bool {
+        // Only do anything when in major sync
+        if !self.major_sync_last_status {
+            let now = Instant::now();
+            if now.duration_since(self.last_major_sync_request) < MAJOR_SYNC_REQUEST_COOLDOWN {
+                return true;
+            }
+            self.last_major_sync_request = now;
+        }
+        false
+    }
+
     fn send_request(&mut self, pre_request: PreRequest<UnverifiedHeaderFor<J>, N::PeerId>) {
+        if self.major_sync_cooldown() {
+            // avoid sending requests too often when in major sync
+            return;
+        }
         self.metrics.report_event(Event::SendRequest);
         let state = match self.handler.state() {
             Ok(state) => state,
